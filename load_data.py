@@ -14,7 +14,7 @@ def _load_iris(**kwargs):
     data = pd.read_csv('data/iris.data', header=None)
 
     X = normalize(
-        data.values[:, 1:-1].astype(np.float32),
+        data.values[:, :-1].astype(np.float32),
         axis=1
     )
     Y_raw = data.values[:, -1]
@@ -27,8 +27,26 @@ def _load_iris(**kwargs):
 
     return X, Y
 
+
+def _load_wine(**kwargs):
+    data = pd.read_csv('data/wine.data', header=None)
+
+    X = normalize(
+        data.values[:, 1:].astype(np.float32),
+        axis=1
+    )
+    Y_raw = data.values[:, 0]
+    classes = {y: i for i, y in enumerate(np.unique(Y_raw))}
+    K = len(classes)
+
+    Y = np.array([
+        one_hot(classes[y], K) for y in Y_raw
+    ])
+
+    return X, Y
 loaders = {
     'iris': _load_iris,
+    'wine': _load_wine
 }
 
 
