@@ -3,23 +3,42 @@ from features import *
 from lp_solve import *
 from scipy import optimize
 
-X, y = load('iris')
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=30)
+"""
+Usage:
+>>> clf = train(X_train, Y_train, Phi, opts)
+>>> score(clf, X_train, y_train, X_test, y_test)
+"""
+
+X, y = load('wine')
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=36)
 
 opts = tfu.struct(
-    iters=50,
-    tol=1e-5,
+    batch_size=32,
+    iters=1000,
+    bfgs_iters=100,
     c_mode='random',
 
     dim_x=X.shape[1],
     dim_y=y.shape[1],
-    dim_phi=64,
-    dim_nu=64 * y.shape[1],
 
+    # for BasicPhi
+    # dim_nu=X.shape[1] ** 2 * y.shape[1], # dim_nu = dim_x**2 * dim_y
 
-    sizes=[128],
+    # for DeepPhi
+    sizes=[64, 64],
+    dim_phi=32,
+    dim_nu=32 * y.shape[1],  # dim_nu = dim_phi * dim_y
+
+    solver_type='Adam',
+    alpha=1e-3,
+    beta1=0.9,
+    beta2=0.999,
+    lr_decay=0.9,
+    lr_step=100,
+    min_alpha=1e-4,
 )
 
+# Phi = BasicPhi(opts)
 Phi = DeepPhi(opts)
 
 
@@ -35,52 +54,48 @@ def train(X, Y, phi, opts):
         raise ValueError('C mode: %s' % opts.mode)
     C[range(k), range(k)] = 0
 
-    nu = np.zeros((opts.dim_nu, 1))
+    # train phi and nu jointly with Adam
+    phi.reset()
+    for _ in range(opts.iters):
+        idx = np.random.randint(len(X), size=(opts.batch_size))
+        x, y = X[idx], Y[idx]
+        C_augs = phi.C(c=C, x=x, y=y)
+        y_down_star, y_up_star, p_star = batch_solve_lp(C_augs)
 
-    for it in range(opts.outer_iters):
-        Phi_ndk = phi.phi(x=X)
+        out = phi.train(c=C, x=x, yt=y, yu=y_up_star, yd=y_down_star)
+        if out.it % 10 == 0:
+            print 'iter: %d, lr: %.3e, loss: %.4f' % (out.it, out.lr, out.loss)
 
-        def func_grad(nu):
-            f, g = 0, 0
-            for phi_x, y_true in zip(Phi_ndk, Y[..., None]):
-                # solve the inner LP
-                y_down_star, v = solve_lp_down(C, nu, phi_x, y_true)
+    # finetune nu with BFGS
+    nu = phi.nu.eval(phi.session)
+    phi_xy = phi.phi(x=X)
 
-                # compute the subgradient
-                f += v
-                g += phi_x.dot(y_down_star - y_true)
-            return f / len(Y), g / len(Y)
+    def func_grad(nu):
+        phi.session.run(phi.nu.assign(nu))
+        C_augs = phi.C(c=C, x=X, y=Y)
+        y_down_star, y_up_star, p_star = batch_solve_lp(C_augs)
+        f = p_star.mean()
+        g = np.einsum('bdk,bk->d', phi_xy, y_down_star - Y) / len(Y)
+        return f, g
 
-        def callback(nu):
-            print func_grad(nu)[0]
+    def callback(nu):
+        print 'bfgs:', func_grad(nu)[0]
 
-        nu, v_star, info = optimize.fmin_l_bfgs_b(
-            func_grad, nu, callback=callback,
-            pgtol=opts.tol, maxiter=opts.inner_nu_iters
-        )
-        info.pop('grad')
-        print v_star, info
+    nu_final, v_star, info = optimize.fmin_l_bfgs_b(
+        func_grad, nu, callback=callback,
+        pgtol=1e-5, maxiter=opts.bfgs_iters,
+    )
+    info.pop('grad')
+    print v_star, info
 
-        Y_down = []
-        for phi_x, y_true in zip(Phi_ndk, Y[..., None]):
-            y_down_star, _ = solve_lp_down(C, nu, phi_x, y_true)
-            Y_down.append(y_down_star)
-        Y_down = np.array(Y_down)
-        print Y_down.shape
+    phi.session.run(phi.nu.assign(nu_final))
 
-        subgrad = nu.dot((Y_down - Y).T)
-        for _ in range(opts.inner_phi_iters):
-            print phi.train(x=X, g=subgrad).loss
+    def classifier(X):
+        C_aug = phi.C(c=C, x=X, y=np.zeros((len(X), k)))
+        y_down_star, y_up_star, _ = batch_solve_lp(C_aug)
+        return y_up_star
 
-    def classifier(X_bd):
-        Y = []
-        Phi_bdk = phi.phi(x=X_bd)
-        for phi_x in Phi_bdk:
-            y_up_star, u = solve_lp_up(C, nu, phi_x)
-            Y.append(y_up_star)
-        return np.squeeze(Y)
-
-    return tfu.struct(nu=nu, C=C, predict=classifier)
+    return tfu.struct(phi=phi, C=C, predict=classifier)
 
 
 def score(clf, X_train, y_train, X_test, y_test):

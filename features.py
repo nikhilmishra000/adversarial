@@ -16,30 +16,52 @@ class BasePhi(tfu.Model):
         with tf.variable_scope(self.scope_name) as self.scope:
             pl = {
                 'x_pl': (None, opts.dim_x),
-                'subgrad_pl': (D, K),
+                'C_pl': (K, K),
+                'y_true_pl': (None, K),
+                'y_down_pl': (None, K),
+                'y_up_pl': (None, K),
             }
             for cmd in tfu.make_placeholders(pl):
                 exec(cmd)
 
             phi_xy = self._phi(x_pl)
-            loss = self._loss(x_pl, subgrad_pl)
+            C_aug = self._cost_matrix(C_pl, phi_xy, y_true_pl)
 
-            if loss is None:
-                train_outputs = tf.no_op()
-            else:
-                it, alpha, train_op = self.make_train_op(loss)
-                train_outputs = tfu.struct(
-                    it=it, alpha=alpha, train_op=train_op
-                )
+            loss = tf.reduce_mean(
+                tf.einsum('bi,bij,bj->b', y_up_pl, C_aug, y_down_pl)
+            )
+
+            it, alpha, train_op = self.make_train_op(loss)
+            train_outputs = tfu.struct(
+                it=it, lr=alpha, train_op=train_op, loss=loss,
+            )
 
             self.functions = [
+                ('reset', {}, tf.global_variables_initializer()),
+
                 ('phi', {'x': x_pl}, phi_xy),
-                ('train', {'x': x_pl, 'g': g_pl}, train_outputs),
+
+                ('C',
+                 {'c': C_pl, 'x': x_pl, 'y': y_true_pl},
+                 C_aug),
+
+                ('train',
+                 {'c': C_pl, 'x': x_pl, 'yt': y_true_pl,
+                  'yd': y_down_pl, 'yu': y_up_pl},
+                 train_outputs),
             ]
             self.finalize()
 
-    def _grad(self, phi_xy, grad_pl):
-        raise NotImplemented
+    def _cost_matrix(self, C, phi, y_true):
+        K = self.opts.dim_y
+        ones = tf.ones([K])
+        self.nu = nu = tfu.scoped_variable(
+            'nu', '', shape=(self.opts.dim_nu),
+            initializer=tf.zeros_initializer(tf.float32)
+        )
+        psi = tf.einsum('k,d,bdj->bkj', ones, nu,
+                        phi - tf.einsum('bdk,bk,j->bdj', phi, y_true, ones))
+        return C + psi
 
     def _phi(self, x):
         raise NotImplemented
@@ -63,29 +85,23 @@ class BasicPhi(BasePhi):
 
         return phi_xy
 
-    def _loss(self, x, g):
-        return None
-
 
 class DeepPhi(BasePhi):
 
     def _phi(self, x):
+        K = self.opts.dim_y
         for i, d in enumerate(self.opts.sizes):
-            x = tf.tanh(
-                tfu.affine(x, d, i, 'phi')
+            x = tfu.leaky_relu(
+                tfu.affine(x, d, i, 'phi'),
+                leak=0.1,
             )
         xx = tfu.affine(x, self.opts.dim_phi, 'out', 'phi')
         zeros = tf.zeros_like(xx)
 
         phi_xy = tf.stack([
-            tf.concat([xx_outer if i == j else zeros
+            tf.concat([xx if i == j else zeros
                        for j in range(K)], axis=1)
             for i in range(K)
         ], axis=2)
 
         return phi_xy
-
-    def _loss(self, x, g):
-        phi = self._phi(x)
-        dummy_loss = tf.reduce_sum(phi * g)
-        return dummy_loss
