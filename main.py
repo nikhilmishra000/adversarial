@@ -2,6 +2,7 @@ from load_data import *
 from features import *
 from lp_solve import *
 from scipy import optimize
+import argparse
 
 """
 Usage:
@@ -9,7 +10,13 @@ Usage:
 >>> score(clf, X_train, y_train, X_test, y_test)
 """
 
-X, y = load('wine')
+parser = argparse.ArgumentParser(
+    description='Choosing dataset for adversarial training.')
+parser.add_argument('dataset', type=str, default='iris',
+                    help='name of dataset to run')
+
+args = parser.parse_args()
+X, y = load(args.dataset)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=36)
 
 opts = tfu.struct(
@@ -42,7 +49,7 @@ opts = tfu.struct(
 Phi = DeepPhi(opts)
 
 
-def train(X, Y, phi, opts):
+def train(X=X_train, Y=y_train, phi=Phi, opts=opts):
     (nx, dx), (ny, k) = X.shape, Y.shape
     assert nx == ny
 
