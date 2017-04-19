@@ -78,7 +78,7 @@ class BasePhi(tfu.Model):
 
 class BasicPhi(BasePhi):
 
-    def _phi(self, x):
+    def _phi(self, x, is_training=True):
         assert x.get_shape().ndims == 2
         K = self.opts.dim_y
         dim_x = x.get_shape()[1].value
@@ -102,8 +102,13 @@ class DeepPhi(BasePhi):
         dim_x = x.get_shape()[1].value
 
         x = tf.reshape(x, [tf.shape(x)[0], 32, 32, 3])
+        layers = list(self.opts.sizes)
+        fc_layers = layers.pop()
 
-        for i, param in enumerate(self.opts.sizes):
+        for i, param in enumerate(layers):
+            if is_training and param.get('dropout'):
+                x = tf.nn.dropout(x, param['dropout'])
+
             x = tfu.conv(x, param, i, 'phi')
             if param.get('batch_norm'):
                 x = tfu.batch_norm(
@@ -118,7 +123,17 @@ class DeepPhi(BasePhi):
 
             print x
 
-        xx = tfu.affine(tfu.ravel(x), self.opts.dim_phi, 'out', 'phi')
+        x = tfu.ravel(x)
+        for i, param in enumerate(fc_layers):
+            x = tfu.leaky_relu(
+                tfu.affine(x, param['size'], 'fc_%d' % i, 'phi'),
+                leak=0.1,
+            )
+            if is_training and param.get('dropout'):
+                x = tf.nn.dropout(x, param['dropout'])
+
+            print x
+        xx = tfu.affine(x, self.opts.dim_phi, 'out', 'phi')
         zeros = tf.zeros_like(xx)
 
         phi_xy = tf.stack([
