@@ -14,6 +14,9 @@ parser = argparse.ArgumentParser(
     description='Choosing dataset for adversarial training.')
 parser.add_argument('dataset', type=str, default='iris',
                     help='name of dataset to run')
+parser.add_argument('phi', type=str,
+                    choices=["basic", "deep"],
+                    help="which type of phi to use. either 'basic' or 'deep'")
 
 args = parser.parse_args()
 X, y = load(args.dataset)
@@ -21,7 +24,7 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=36)
 
 opts = tfu.struct(
     batch_size=32,
-    iters=1000,
+    iters=300,
     bfgs_iters=100,
     c_mode='random',
 
@@ -29,12 +32,12 @@ opts = tfu.struct(
     dim_y=y.shape[1],
 
     # for BasicPhi
-    # dim_nu=X.shape[1] ** 2 * y.shape[1], # dim_nu = dim_x**2 * dim_y
+    # dim_nu=X.shape[1] ** 2 * y.shape[1],  # dim_nu = dim_x**2 * dim_y
 
     # for DeepPhi
-    sizes=[64, 64],
-    dim_phi=32,
-    dim_nu=32 * y.shape[1],  # dim_nu = dim_phi * dim_y
+    sizes=[32, 32],
+    dim_phi=36,
+    dim_nu=36 * y.shape[1],  # dim_nu = dim_phi * dim_y
 
     solver_type='Adam',
     alpha=1e-3,
@@ -45,8 +48,10 @@ opts = tfu.struct(
     min_alpha=1e-4,
 )
 
-# Phi = BasicPhi(opts)
-Phi = DeepPhi(opts)
+if args.phi == "basic":
+    Phi = BasicPhi(opts)
+elif args.phi == "deep":
+    Phi = DeepPhi(opts)
 
 
 def train(X=X_train, Y=y_train, phi=Phi, opts=opts):
@@ -105,7 +110,7 @@ def train(X=X_train, Y=y_train, phi=Phi, opts=opts):
     return tfu.struct(phi=phi, C=C, predict=classifier)
 
 
-def score(clf, X_train, y_train, X_test, y_test):
+def score(clf, X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test):
     y_hat_train = clf.predict(X_train)
     train_acc = np.equal(y_hat_train.argmax(-1), y_train.argmax(-1)).mean()
     train_loss = np.einsum('bi,ij,bj->b', y_hat_train, clf.C, y_train).mean()

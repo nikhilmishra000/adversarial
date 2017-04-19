@@ -90,6 +90,9 @@ class DeepPhi(BasePhi):
 
     def _phi(self, x):
         K = self.opts.dim_y
+        dim_x = x.get_shape()[1].value
+ #       x = tf.reshape(tf.einsum('bi,bj->bij', x, x),
+ #                      [tf.shape(x)[0], dim_x * dim_x])
         for i, d in enumerate(self.opts.sizes):
             x = tfu.leaky_relu(
                 tfu.affine(x, d, i, 'phi'),
