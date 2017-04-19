@@ -12,21 +12,21 @@ Usage:
 
 parser = argparse.ArgumentParser(
     description='Choosing dataset for adversarial training.')
-parser.add_argument('dataset', type=str, default='iris',
-                    help='name of dataset to run')
+parser.add_argument('dataset', type=str, help='name of dataset to run')
 parser.add_argument('phi', type=str,
                     choices=["basic", "deep"],
                     help="which type of phi to use. either 'basic' or 'deep'")
 
 args = parser.parse_args()
 X, y = load(args.dataset)
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=36)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=1000)
 
 opts = tfu.struct(
-    batch_size=32,
-    iters=300,
+    batch_size=64,
+    iters=10000,
     bfgs_iters=100,
-    c_mode='random',
+    bfgs_batch_size=1000,
+    c_mode='ones',
 
     dim_x=X.shape[1],
     dim_y=y.shape[1],
@@ -35,16 +35,48 @@ opts = tfu.struct(
     # dim_nu=X.shape[1] ** 2 * y.shape[1],  # dim_nu = dim_x**2 * dim_y
 
     # for DeepPhi
-    sizes=[32, 32],
-    dim_phi=36,
-    dim_nu=36 * y.shape[1],  # dim_nu = dim_phi * dim_y
+    sizes=[
+        {
+            'kernel': (5, 5, 64),
+            'batch_norm': {'decay': 0.99},
+        },
+        {
+            'kernel': (5, 5, 128),
+            'batch_norm': {'decay': 0.99},
+        },
+        {
+            'kernel': (3, 3, 128),
+            'batch_norm': {'decay': 0.99},
+            'pool': {
+                'kernel': (2, 2),
+                'type': 'max',
+            },
+        },
+        {
+            'kernel': (3, 3, 128),
+            'pad': 'VALID',
+            'batch_norm': {'decay': 0.99},
+        },
+        {
+            'kernel': (3, 3, 128),
+            'pad': 'VALID',
+            'batch_norm': {'decay': 0.99},
+        },
+        {
+            'kernel': (3, 3, 128),
+            'pad': 'VALID',
+            'batch_norm': {'decay': 0.99},
+        },
+    ],
+    dim_phi=64,
+    dim_nu=64 * y.shape[1],  # dim_nu = dim_phi * dim_y
 
     solver_type='Adam',
     alpha=1e-3,
     beta1=0.9,
     beta2=0.999,
     lr_decay=0.9,
-    lr_step=100,
+    lr_step=1000,
     min_alpha=1e-4,
 )
 
@@ -80,14 +112,19 @@ def train(X=X_train, Y=y_train, phi=Phi, opts=opts):
 
     # finetune nu with BFGS
     nu = phi.nu.eval(phi.session)
-    phi_xy = phi.phi(x=X)
+    phi_xy = np.concatenate([
+        phi.phi(x=X[i:i + opts.batch_size]) for i in range(0, len(X), opts.batch_size)
+    ])
 
     def func_grad(nu):
         phi.session.run(phi.nu.assign(nu))
-        C_augs = phi.C(c=C, x=X, y=Y)
+        idx = np.random.randint(len(X), size=(opts.bfgs_batch_size))
+        x, y = X[idx], Y[idx]
+        C_augs = phi.C(c=C, x=x, y=y)
         y_down_star, y_up_star, p_star = batch_solve_lp(C_augs)
         f = p_star.mean()
-        g = np.einsum('bdk,bk->d', phi_xy, y_down_star - Y) / len(Y)
+        g = np.einsum('bdk,bk->d', phi_xy[idx],
+                      y_down_star - Y[idx]) / len(idx)
         return f, g
 
     def callback(nu):
@@ -103,7 +140,10 @@ def train(X=X_train, Y=y_train, phi=Phi, opts=opts):
     phi.session.run(phi.nu.assign(nu_final))
 
     def classifier(X):
-        C_aug = phi.C(c=C, x=X, y=np.zeros((len(X), k)))
+        C_aug = np.concatenate([
+            phi.C_test(c=C, x=X[i:i + opts.batch_size])
+            for i in range(0, len(X), opts.batch_size)
+        ])
         y_down_star, y_up_star, _ = batch_solve_lp(C_aug)
         return y_up_star
 
