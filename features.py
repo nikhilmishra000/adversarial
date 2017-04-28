@@ -14,41 +14,40 @@ class BasePhi(tfu.Model):
         K, D = opts.dim_y, opts.dim_nu
 
         with tf.variable_scope(self.scope_name) as self.scope:
-            pl = {
-                'x_pl': (None, opts.dim_x),
-                'C_pl': (K, K),
-                'y_true_pl': (None, K),
-                'y_down_pl': (None, K),
-                'y_up_pl': (None, K),
-            }
-            for cmd in tfu.make_placeholders(pl):
-                exec(cmd)
+            globals().update(
+                tfu.make_placeholders({
+                    'x_pl': (None, opts.dim_x),
+                    'C_pl': (K, K),
+                    'y_true_pl': (None, K),
+                    'y_down_pl': (None, K),
+                    'y_up_pl': (None, K),
+                })
+            )
 
-            phi_xy = self._phi(x_pl, is_training=True)
-            phi_xy_test = self._phi(x_pl, is_training=False)
+            train_feats = self._features(x_pl, is_training=True)
+            test_feats = self._features(x_pl, is_training=False)
+            phi_xy_train = self._phi(train_feats)
+            phi_xy_test = self._phi(test_feats)
 
-            C_aug = self._cost_matrix(C_pl, phi_xy, y_true_pl)
+            C_aug_train = self._cost_matrix(C_pl, phi_xy_train, y_true_pl)
             C_aug_test = self._cost_matrix(
                 C_pl, phi_xy_test, tf.zeros([tf.shape(x_pl)[0], K])
             )
 
             loss = tf.reduce_mean(
-                tf.einsum('bi,bij,bj->b', y_up_pl, C_aug, y_down_pl)
+                tf.einsum('bi,bij,bj->b', y_up_pl, C_aug_train, y_down_pl)
             )
-
             it, alpha, train_op = self.make_train_op(loss)
             train_outputs = tfu.struct(
                 it=it, lr=alpha, train_op=train_op, loss=loss,
             )
 
             self.functions = [
-                ('reset', {}, tf.global_variables_initializer()),
-
-                ('phi', {'x': x_pl}, phi_xy),
+                ('phi', {'x': x_pl}, phi_xy_train),
 
                 ('C',
                  {'c': C_pl, 'x': x_pl, 'y': y_true_pl},
-                 C_aug),
+                 C_aug_train),
 
                 ('C_test',
                  {'c': C_pl, 'x': x_pl, 'y': y_true_pl},
@@ -72,32 +71,31 @@ class BasePhi(tfu.Model):
                         phi - tf.einsum('bdk,bk,j->bdj', phi, y_true, ones))
         return C + psi
 
-    def _phi(self, x):
-        raise NotImplemented
+    def _phi(self, xx):
+        K = self.opts.dim_y
+        zeros = tf.zeros_like(xx)
+        phi_xy = tf.stack([
+            tf.concat([xx if i == j else zeros
+                       for j in range(K)], axis=1)
+            for i in range(K)
+        ], axis=2)
+        return phi_xy
 
 
 class BasicPhi(BasePhi):
 
-    def _phi(self, x, is_training=True):
+    def _features(self, x, is_training=True):
         assert x.get_shape().ndims == 2
         K = self.opts.dim_y
         dim_x = x.get_shape()[1].value
         xx_outer = tf.reshape(tf.einsum('bi,bj->bij', x, x),
                               [tf.shape(x)[0], dim_x * dim_x])
-        zeros = tf.zeros_like(xx_outer)
-
-        phi_xy = tf.stack([
-            tf.concat([xx_outer if i == j else zeros
-                       for j in range(K)], axis=1)
-            for i in range(K)
-        ], axis=2)
-
-        return phi_xy
+        return xx_outer
 
 
 class DeepPhi(BasePhi):
 
-    def _phi(self, x, is_training=True):
+    def _features(self, x, is_training=True):
         K = self.opts.dim_y
         dim_x = x.get_shape()[1].value
 
@@ -133,13 +131,53 @@ class DeepPhi(BasePhi):
                 x = tf.nn.dropout(x, param['dropout'])
 
             print x
-        xx = tfu.affine(x, self.opts.dim_phi, 'out', 'phi')
-        zeros = tf.zeros_like(xx)
+        return tfu.affine(x, self.opts.dim_phi, 'out', 'phi')
 
-        phi_xy = tf.stack([
-            tf.concat([xx if i == j else zeros
-                       for j in range(K)], axis=1)
-            for i in range(K)
-        ], axis=2)
 
-        return phi_xy
+class DeepBaseline(DeepPhi):
+
+    scope_name = 'baseline'
+
+    def __init__(self, opts):
+        super(BasePhi, self).__init__(opts)
+        self.session = tfu.make_session()
+
+        K, D = opts.dim_y, opts.dim_nu
+
+        with tf.variable_scope(self.scope_name) as self.scope:
+            globals().update(
+                tfu.make_placeholders({
+                    'x_pl': (None, opts.dim_x),
+                    'y_true_pl': (None, K),
+                })
+            )
+
+            train_feats = tf.nn.relu(
+                self._features(x_pl, is_training=True)
+            )
+            test_feats = tf.nn.relu(
+                self._features(x_pl, is_training=False)
+            )
+            y_hat_train = tfu.affine(train_feats, K, 'logits', 'phi')
+            y_hat_test = tf.nn.softmax(
+                tfu.affine(test_feats, K, 'logits', 'phi')
+            )
+
+            loss = tf.reduce_mean(
+                tf.nn.softmax_cross_entropy_with_logits(
+                    logits=y_hat_train, labels=y_true_pl
+                )
+            )
+
+            it, alpha, train_op = self.make_train_op(loss)
+            train_outputs = tfu.struct(
+                it=it, lr=alpha, train_op=train_op, loss=loss,
+            )
+
+            self.functions = [
+                ('train', {'x': x_pl, 'y': y_true_pl},
+                 train_outputs),
+
+                ('test', {'x': x_pl}, y_hat_test),
+            ]
+            self.finalize()

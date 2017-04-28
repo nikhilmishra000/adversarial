@@ -59,15 +59,15 @@ opts = tfu.struct(
     dim_nu=128 * y.shape[1],
 
     solver_type='Adam',
-    alpha=1e-3,
+    alpha=1e-4,
     beta1=0.9,
     beta2=0.999,
-    lr_decay=0.9,
-    lr_step=1000,
-    min_alpha=1e-4,
+    # lr_decay=0.9,
+    # lr_step=1000,
+    # min_alpha=1e-4,
 )
 
-phi = DeepPhi(opts)
+phi = DeepBaseline(opts)
 
 
 def train():
@@ -83,21 +83,18 @@ def train():
         raise ValueError('C mode: %s' % opts.mode)
     C[range(k), range(k)] = 0
 
+    # train phi and nu jointly with Adam
     buf = [[], []]
     for _ in range(opts.iters):
         idx = np.random.randint(N, size=(opts.batch_size))
         x, y = X_train[idx], y_train[idx]
-        C_augs = phi.C(c=C, x=x, y=y)
-        y_down_star, y_up_star, p_star = batch_solve_lp(C_augs)
-
-        out = phi.train(c=C, x=x, yt=y, yu=y_up_star, yd=y_down_star)
+        out = phi.train(x=x, y=y)
         buf[0].append(out.loss)
 
         if out.it % 50 == 0:
             loss = np.mean(buf[0][-50:])
             idx = np.random.randint(Nt, size=(opts.batch_size))
-            C_augs = phi.C_test(c=C, x=X_test[idx])
-            _, y_up_star, _ = batch_solve_lp(C_augs)
+            y_up_star = phi.test(x=X_test[idx])
             test_loss = np.equal(y_up_star.argmax(-1),
                                  y_test[idx].argmax(-1)).mean()
             buf[1].append(test_loss)
@@ -106,11 +103,10 @@ def train():
             )
 
     def classifier(X):
-        C_aug = np.concatenate([
-            phi.C_test(c=C, x=X[i:i + opts.batch_size])
+        y_up_star = np.concatenate([
+            phi.test(x=X[i:i + opts.batch_size])
             for i in range(0, len(X), opts.batch_size)
         ])
-        y_down_star, y_up_star, _ = batch_solve_lp(C_aug)
         return y_up_star
 
     return tfu.struct(phi=phi, C=C, predict=classifier, buf=buf)
